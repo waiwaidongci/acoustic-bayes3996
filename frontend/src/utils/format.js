@@ -2,4 +2,4 @@ export const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<
 export const fmt=value=>typeof value==='number'?(Number.isInteger(value)?String(value):value.toLocaleString('zh-CN',{maximumFractionDigits:4})):esc(value);
 export const formObject=form=>Object.fromEntries(new FormData(form));
 
-export const localTime=value=>new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).format(new Date(value));
+export const localTime=value=>{if(!value)return '';const date=new Date(value);return Number.isNaN(date.getTime())?'':new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).format(date)};

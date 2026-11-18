@@ -1,4 +1,5 @@
 import json,random,logging
+from datetime import datetime,timezone
 from sqlalchemy import select,func
 from src.config.database import Base,engine,Session
 from src.config.settings import CONFIG
@@ -6,7 +7,8 @@ from src.models.user import User
 from src.models.source import Source
 from src.models.record import Record
 from src.models.run import Run
-from src.models import note,audit
+from src.models import note,audit,monitor
+from src.models.monitor import MonitorDevice,MonitorMessage,MonitorAlarm
 from src.utils.security import hash_password
 from src.utils.serialization import now
 from src.services.runs import queue
@@ -30,8 +32,66 @@ def seed_values(kind,index,batch,rng):
         uid=index//6;slot=index%6;exhibit=(uid%3*3+slot)%12
         return {'visitor':f'V{uid+1:03}','exhibit':f'E{exhibit+1:02}','rating':round(max(1,min(5,3+(1 if exhibit%3==uid%3 else -.4)+rng.gauss(0,.55))),1)}
 
+MONITOR_DEVICES=[('TX-MOTOR-01','一号轴流电机'),('TX-MOTOR-02','二号轴流电机'),('TX-PUMP-03','三号循环泵')]
+MONITOR_LINES={
+    'TX-MOTOR-01':[('01-00','2026-11-17T01:00:00Z',{'rms':1.2,'centroid':900,'kurtosis':2.8}),
+                   ('01-01','2026-11-17T01:03:00Z',{'rms':3.0,'centroid':1600,'kurtosis':5.2}),
+                   ('01-02','2026-11-17T01:06:00Z',{'rms':3.0,'centroid':1600,'kurtosis':5.2}),
+                   ('01-03','2026-11-17T01:09:00Z',{'rms':3.0,'centroid':1600,'kurtosis':5.2}),
+                   ('01-04','2026-11-17T01:12:00Z',{'rms':3.0,'centroid':1600,'kurtosis':5.2})],
+    'TX-MOTOR-02':[('02-01','2026-11-17T01:02:00Z',{'rms':2.0,'centroid':2300,'kurtosis':3.9}),
+                   ('02-02','2026-11-17T01:05:00Z',{'rms':2.0,'centroid':2300,'kurtosis':3.9}),
+                   ('02-03','2026-11-17T01:08:00Z',{'rms':2.0,'centroid':2300,'kurtosis':3.9})],
+    'TX-PUMP-03':[('03-01','2026-11-17T01:00:00Z',{'rms':1.2,'centroid':900,'kurtosis':2.8}),
+                   ('03-02','2026-11-17T01:03:00Z',{'rms':3.0,'centroid':1600,'kurtosis':5.2}),
+                   ('03-03','2026-11-17T01:05:00Z',{'rms':3.0,'centroid':1600,'kurtosis':5.2}),
+                   ('03-04','2026-11-17T01:07:00Z',{'rms':3.0,'centroid':1600,'kurtosis':5.2}),
+                   ('03-05','2026-11-17T01:09:00Z',{'rms':1.2,'centroid':900,'kurtosis':2.8})],
+}
+
+def seed_monitor():
+    """Freeze the newest completed research and replay a short device stream.
+
+    The replay exercises the monitoring rules end to end: one active alarm, one alarm
+    corrected by a late record, one alarm revoked by a late normal record, and one
+    rejected stale record. Devices are only created once, so repeated calls or a
+    restart never duplicates or rewrites operator decisions.
+    """
+    from src.models.monitor import MonitorModel,MonitorDevice,MonitorBinding,MonitorMessage
+    from src.services import monitor as ms
+    from src.schemas.monitor import MessageBatch
+    with Session() as db:
+        if db.scalar(select(MonitorDevice.id)):return None
+        run=db.scalar(select(Run).where(Run.state=='completed').order_by(Run.id))
+        if not run:return None
+        admin=db.scalar(select(User).where(User.role=='admin'))
+        model=db.scalar(select(MonitorModel).where(MonitorModel.run_id==run.id))
+        if not model:
+            frozen=ms.freeze_run_model(db,admin,run,'M-202611-01')
+            model=db.get(MonitorModel,frozen['id'])
+        devices={}
+        for key,name in MONITOR_DEVICES:
+            d=MonitorDevice(key=key,name=name,created_at=now());db.add(d);db.flush()
+            devices[key]=d
+            db.add(MonitorBinding(device_id=d.id,model_id=model.id,effective_from='2026-11-01T00:00:00+00:00',created_by=admin.email,created_at=now()))
+        db.commit()
+        for key,lines in MONITOR_LINES.items():
+            d=devices[key]
+            for suffix,event,features in lines:
+                db.add(MonitorMessage(device_id=d.id,message_key=key+'-'+suffix,reference='SEQ-'+suffix,event_time=event,features=features,status='received',reason='',received_at=event))
+            db.commit()
+            ms.recover_device(db,admin,d.id)
+        late=[('TX-MOTOR-01',[('01-05','2026-11-17T01:10:00Z',{'rms':3.0,'centroid':1600,'kurtosis':5.2})],'2026-11-17T01:13:00Z'),
+              ('TX-MOTOR-02',[('02-04','2026-11-17T01:06:00Z',{'rms':1.2,'centroid':900,'kurtosis':2.8})],'2026-11-17T01:10:00Z'),
+              ('TX-PUMP-03',[('03-99','2026-11-17T00:30:00Z',{'rms':3.0,'centroid':1600,'kurtosis':5.2})],'2026-11-17T01:20:00Z')]
+        for key,items,received in late:
+            d=devices[key]
+            messages=[{'message_key':key+'-'+suffix,'reference':'SEQ-'+suffix,'event_time':event,'features':features} for suffix,event,features in items]
+            ms.ingest(db,admin,d.id,MessageBatch(messages=messages),received)
+        return {'devices':len(devices)}
+
 def counts(db):
-    return {cls.__tablename__:db.scalar(select(func.count()).select_from(cls)) for cls in (User,Source,Record,Run)}
+    return {cls.__tablename__:db.scalar(select(func.count()).select_from(cls)) for cls in (User,Source,Record,Run,MonitorDevice,MonitorMessage,MonitorAlarm)}
 def seed():
     Base.metadata.create_all(engine);rng=random.Random(42);queued=[]
     with Session() as db:
@@ -53,6 +113,8 @@ def seed():
                 records=[{'id':r.id,'source_id':r.source_id,'reference':r.reference,'values':r.values} for r in db.scalars(select(Record).where(Record.source_id==source.id).order_by(Record.id))]
                 run=Run(source_id=source.id,name='首轮种子研究',state='queued',parameters=CONFIG['default_parameters'],snapshot={'source':{'id':source.id,'name':source.name,'filename':source.filename},'records':records},created_at=now());db.add(run);db.flush();queued.append(run.id)
         db.commit();print(json.dumps(counts(db),ensure_ascii=False))
+    try:seed_monitor()
+    except Exception:logging.exception('monitor seed skipped')
     for id in queued:
         try:queue.rpush('analysis:queue',id)
         except Exception:logging.exception('seed queue unavailable')

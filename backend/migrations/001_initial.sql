@@ -1,3 +1,11 @@
 -- SQLAlchemy metadata initializes tables idempotently.
 -- Domain tables: acoustic_batches, acoustic_samples, classifier_runs, inspection_notes.
--- Unique natural keys: source.key; (record.source_id, record.reference).
+-- Continuous monitoring: monitor_models, monitor_devices, monitor_bindings,
+--   monitor_messages, monitor_alarms, monitor_alarm_events.
+-- Unique natural keys: source.key; (record.source_id, record.reference);
+--   monitor_models.version_code; monitor_devices.key;
+--   (monitor_bindings.device_id, monitor_bindings.effective_from);
+--   (monitor_messages.device_id, monitor_messages.message_key);
+--   (monitor_alarms.device_id, monitor_alarms.identity);
+--   monitor_alarm_events.dedupe_key (one raised/corrected/closed/reopened/revoked
+--   notification per alarm revision, so retries and crash recovery cannot re-send).

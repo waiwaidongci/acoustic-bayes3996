@@ -100,5 +100,22 @@ export const domain = {
     "prediction": "预计评分",
     "method": "计算依据",
     "neighbor_count": "参与邻居数"
+  },
+  "monitor": {
+    "normal_label": "正常",
+    "late_window_minutes": 5,
+    "segment_window_minutes": 10,
+    "trigger_count": 3,
+    "features": [
+      "rms",
+      "centroid",
+      "kurtosis"
+    ],
+    "alarm_revoke_reason": "迟到记录重排后该告警段不再成立",
+    "signature": {
+      "rms": 3.0,
+      "centroid": 1600.0,
+      "kurtosis": 5.2
+    }
   }
 };
